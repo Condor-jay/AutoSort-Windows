@@ -1,42 +1,45 @@
-# AutoSort - Windows File Organizer
-# Organizes files by type. Does not delete files or overwrite duplicates.
-# Test with copies of your files before using it on important folders.
+
+# AutoSort v2.0
+# Organize files from multiple common Windows folders.
+# Review the preview before confirming any file moves.
 
 $ErrorActionPreference = "Stop"
 
 try {
     Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
 
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Choose a folder to organize"
-    $dialog.ShowNewFolderButton = $false
-
-    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
-        Write-Host "Cancelled. No files were changed."
-        exit
-    }
-
-    $Source = $dialog.SelectedPath
-    $Destination = Join-Path $Source "Sorted"
-
-    # Safety check: avoid common Windows system folders.
-    $ProtectedFolders = @(
-        $env:WINDIR,
-        $env:ProgramFiles,
-        ${env:ProgramFiles(x86)},
-        $env:ProgramData
-    ) | Where-Object { $_ }
-
-    foreach ($Protected in $ProtectedFolders) {
-        if ($Source.TrimEnd('\') -ieq $Protected.TrimEnd('\')) {
-            [System.Windows.Forms.MessageBox]::Show(
-                "Please choose a normal folder, not a Windows system folder.",
-                "AutoSort - Safety Check"
-            ) | Out-Null
-            exit
+    # Find common Windows folders.
+    $FolderOptions = @(
+        [PSCustomObject]@{
+            Name = "Desktop"
+            Path = [Environment]::GetFolderPath("Desktop")
         }
+        [PSCustomObject]@{
+            Name = "Downloads"
+            Path = (Join-Path $HOME "Downloads")
+        }
+        [PSCustomObject]@{
+            Name = "Documents"
+            Path = [Environment]::GetFolderPath("MyDocuments")
+        }
+        [PSCustomObject]@{
+            Name = "Pictures"
+            Path = [Environment]::GetFolderPath("MyPictures")
+        }
+        [PSCustomObject]@{
+            Name = "Music"
+            Path = [Environment]::GetFolderPath("MyMusic")
+        }
+        [PSCustomObject]@{
+            Name = "Videos"
+            Path = [Environment]::GetFolderPath("MyVideos")
+        }
+    ) | Where-Object {
+        $_.Path -and (Test-Path -LiteralPath $_.Path -PathType Container)
     }
 
+    # File type categories.
     $Categories = @{
         ".jpg"="Images"; ".jpeg"="Images"; ".png"="Images"
         ".gif"="Images"; ".bmp"="Images"; ".webp"="Images"
@@ -62,77 +65,150 @@ try {
         ".psd"="Design"; ".ai"="Design"; ".eps"="Design"
         ".cdr"="Design"; ".indd"="Design"; ".xcf"="Design"
 
-        ".exe"="Programs"; ".msi"="Programs"
-        ".apk"="Programs"; ".bat"="Programs"
+        ".exe"="Programs"; ".msi"="Programs"; ".apk"="Programs"
     }
 
-    $Files = @(
-        Get-ChildItem -LiteralPath $Source -File |
-        Where-Object { $_.DirectoryName -ne $Destination }
-    )
+    # Choose locations in a window.
+    $Form = New-Object System.Windows.Forms.Form
+    $Form.Text = "AutoSort - Choose folders"
+    $Form.Size = New-Object System.Drawing.Size(470, 420)
+    $Form.StartPosition = "CenterScreen"
+    $Form.FormBorderStyle = "FixedDialog"
+    $Form.MaximizeBox = $false
 
-    if ($Files.Count -eq 0) {
+    $Label = New-Object System.Windows.Forms.Label
+    $Label.Text = "Select the folders you want AutoSort to organize:"
+    $Label.Location = New-Object System.Drawing.Point(18, 18)
+    $Label.Size = New-Object System.Drawing.Size(420, 28)
+    $Form.Controls.Add($Label)
+
+    $List = New-Object System.Windows.Forms.CheckedListBox
+    $List.Location = New-Object System.Drawing.Point(20, 55)
+    $List.Size = New-Object System.Drawing.Size(410, 220)
+    $List.CheckOnClick = $true
+    $List.DisplayMember = "Name"
+
+    foreach ($Option in $FolderOptions) {
+        [void]$List.Items.Add($Option, $false)
+    }
+    $Form.Controls.Add($List)
+
+    $Note = New-Object System.Windows.Forms.Label
+    $Note.Text = "Files directly inside selected folders are organized. Existing subfolders are left alone."
+    $Note.Location = New-Object System.Drawing.Point(20, 285)
+    $Note.Size = New-Object System.Drawing.Size(410, 42)
+    $Form.Controls.Add($Note)
+
+    $RunButton = New-Object System.Windows.Forms.Button
+    $RunButton.Text = "Preview files"
+    $RunButton.Location = New-Object System.Drawing.Point(220, 335)
+    $RunButton.Size = New-Object System.Drawing.Size(105, 30)
+    $RunButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $Form.Controls.Add($RunButton)
+
+    $CancelButton = New-Object System.Windows.Forms.Button
+    $CancelButton.Text = "Cancel"
+    $CancelButton.Location = New-Object System.Drawing.Point(330, 335)
+    $CancelButton.Size = New-Object System.Drawing.Size(100, 30)
+    $CancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $Form.Controls.Add($CancelButton)
+
+    $Form.AcceptButton = $RunButton
+    $Form.CancelButton = $CancelButton
+
+    $Choice = $Form.ShowDialog()
+    if ($Choice -ne [System.Windows.Forms.DialogResult]::OK) {
+        Write-Host "Cancelled. No files were changed."
+        exit
+    }
+
+    $SelectedFolders = @($List.CheckedItems)
+    if ($SelectedFolders.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show(
-            "No files found directly inside the selected folder.",
+            "Select at least one folder.",
             "AutoSort"
         ) | Out-Null
         exit
     }
 
-    $Plan = foreach ($File in $Files) {
-        $Extension = $File.Extension.ToLowerInvariant()
+    # Build the plan without moving anything.
+    $Plan = @()
+    $Ignored = 0
 
-        if ($Categories.ContainsKey($Extension)) {
-            $Category = $Categories[$Extension]
-        }
-        else {
-            $Category = "Other"
-        }
+    foreach ($Folder in $SelectedFolders) {
+        $Files = @(Get-ChildItem -LiteralPath $Folder.Path -File)
 
-        $TargetFolder = Join-Path $Destination $Category
-        $TargetPath = Join-Path $TargetFolder $File.Name
+        foreach ($File in $Files) {
+            # Keep common shortcuts and system metadata in place.
+            if ($File.Extension -in @(".lnk", ".url") -or
+                $File.Name -ieq "desktop.ini" -or
+                $File.Name -ieq "AutoSort.ps1") {
+                $Ignored++
+                continue
+            }
 
-        [PSCustomObject]@{
-            Name = $File.Name
-            Category = $Category
-            SourcePath = $File.FullName
-            TargetFolder = $TargetFolder
-            TargetPath = $TargetPath
+            $Extension = $File.Extension.ToLowerInvariant()
+            if ($Categories.ContainsKey($Extension)) {
+                $Category = $Categories[$Extension]
+            }
+            else {
+                $Category = "Other"
+            }
+
+            $SortedRoot = Join-Path $Folder.Path "Sorted"
+            $TargetFolder = Join-Path $SortedRoot $Category
+            $TargetPath = Join-Path $TargetFolder $File.Name
+
+            $Plan += [PSCustomObject]@{
+                Name = $File.Name
+                From = $File.FullName
+                FolderName = $Folder.Name
+                TargetFolder = $TargetFolder
+                TargetPath = $TargetPath
+            }
         }
     }
 
-    $Preview = (
-        $Plan | Select-Object -First 20 | ForEach-Object {
-            "$($_.Name)  ->  $($_.Category)"
-        }
-    ) -join "`r`n"
+    if ($Plan.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show(
+            "No eligible files were found in the selected folders.",
+            "AutoSort"
+        ) | Out-Null
+        exit
+    }
 
-    if ($Plan.Count -gt 20) {
-        $Preview += "`r`n...and $($Plan.Count - 20) more files."
+    # Show a preview and ask for confirmation.
+    $PreviewLines = @(
+        $Plan | Select-Object -First 22 | ForEach-Object {
+            "$($_.FolderName): $($_.Name) -> Sorted\$(
+                Split-Path $_.TargetFolder -Leaf
+            )"
+        }
+    )
+
+    $Preview = $PreviewLines -join "`r`n"
+    if ($Plan.Count -gt 22) {
+        $Preview += "`r`n...and $($Plan.Count - 22) more files."
     }
 
     $Message = @"
-AutoSort will organize files inside:
-
-$Source
-
-A "Sorted" folder will be created with categories such as Images,
-Documents, Videos, Audio, Archives, Design, Programs, and Other.
-
-It will NOT delete files or overwrite files with the same name.
-Subfolders will not be processed.
+AutoSort found $($Plan.Count) file(s) to organize.
+Ignored shortcuts/system metadata: $Ignored
 
 PREVIEW:
 $Preview
 
-Continue? Test on copies of files first.
+Files will be moved into a "Sorted" folder inside each selected location.
+Existing subfolders will not be scanned.
+Files with destination name conflicts will be skipped.
+Continue? Test on copies first.
 "@
 
     $Answer = [System.Windows.Forms.MessageBox]::Show(
         $Message,
-        "AutoSort - Review Before Moving",
+        "AutoSort - Confirm changes",
         [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Question
+        [System.Windows.Forms.MessageBoxIcon]::Warning
     )
 
     if ($Answer -ne [System.Windows.Forms.DialogResult]::Yes) {
@@ -140,15 +216,15 @@ Continue? Test on copies of files first.
         exit
     }
 
+    # Move only after confirmation.
     $Moved = 0
     $Skipped = 0
     $Errors = 0
 
     foreach ($Item in $Plan) {
         try {
-            # Skip files that already exist at the destination.
+            # Never overwrite an existing destination file.
             if (Test-Path -LiteralPath $Item.TargetPath) {
-                Write-Host "Skipped duplicate: $($Item.Name)" -ForegroundColor Yellow
                 $Skipped++
                 continue
             }
@@ -158,16 +234,15 @@ Continue? Test on copies of files first.
                     -Path $Item.TargetFolder | Out-Null
             }
 
-            # Recheck immediately before moving.
+            # Recheck just before moving.
             if (Test-Path -LiteralPath $Item.TargetPath) {
                 $Skipped++
                 continue
             }
 
-            Move-Item -LiteralPath $Item.SourcePath `
-                -Destination $Item.TargetPath
+            Move-Item -LiteralPath $Item.From `
+                -Destination $Item.TargetPath -ErrorAction Stop
 
-            Write-Host "Organized: $($Item.Name)" -ForegroundColor Green
             $Moved++
         }
         catch {
@@ -178,14 +253,13 @@ Continue? Test on copies of files first.
     }
 
     $Summary = @"
-Organization complete!
+AutoSort finished!
 
 Files moved: $Moved
 Files skipped: $Skipped
 Errors: $Errors
 
-Your organized files are in:
-$Destination
+Check the "Sorted" folder inside each selected location.
 "@
 
     [System.Windows.Forms.MessageBox]::Show(
@@ -194,7 +268,6 @@ $Destination
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Information
     ) | Out-Null
-
 }
 catch {
     [System.Windows.Forms.MessageBox]::Show(
@@ -203,4 +276,6 @@ catch {
         [System.Windows.Forms.MessageBoxButtons]::OK,
         [System.Windows.Forms.MessageBoxIcon]::Error
     ) | Out-Null
+
+    Write-Host $_.Exception.Message -ForegroundColor Red
 }
